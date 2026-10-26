@@ -72,26 +72,27 @@
       }
     };
 
-    async function connectBLEMIDI() {
-      const midiServiceUUID = '03b80e5a-ede8-4b33-a751-6ce34e4c7000';
-      const midiCharUUID    = '7772e528-29b2-4b23-a877-2415836f1205';
-      try {
-        const device = await navigator.bluetooth.requestDevice({
-          filters: [{ services: [midiServiceUUID] }],
-          optionalServices: [midiServiceUUID]
-        });
-        const server = await device.gatt.connect();
-        const service = await server.getPrimaryService(midiServiceUUID);
-        const chara = await service.getCharacteristic(midiCharUUID);
-        await chara.startNotifications();
-        chara.addEventListener('characteristicvaluechanged', handleBLEMIDIPacket);
-        const btn = document.getElementById('midiBtn');
-        if (btn) { btn.classList.add('midi-connected'); btn.innerText = 'MIDI OK'; }
-      } catch (err) {
-        console.error('BLE MIDI 接続エラー:', err);
-        alert('BLE MIDI機器の接続に失敗したか、キャンセルされました。');
-      }
-    }
+// 修正後（すべてのBluetooth機器を検索一覧に出す）
+async function connectBLEMIDI() {
+  const midiServiceUUID = '03b80e5a-ede8-4b33-a751-6ce34e4c7000';
+  const midiCharUUID    = '7772e528-29b2-4b23-a877-2415836f1205';
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true, // フィルターを外してすべてのデバイスを表示
+      optionalServices: [midiServiceUUID]
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(midiServiceUUID);
+    const chara = await service.getCharacteristic(midiCharUUID);
+    await chara.startNotifications();
+    chara.addEventListener('characteristicvaluechanged', handleBLEMIDIPacket);
+    const btn = document.getElementById('midiBtn');
+    if (btn) { btn.classList.add('midi-connected'); btn.innerText = 'MIDI OK'; }
+  } catch (err) {
+    console.error('BLE MIDI 接続エラー:', err);
+    alert('BLE MIDI機器の接続に失敗したか、キャンセルされました。');
+  }
+}
 
     function handleBLEMIDIPacket(event) {
       const val = new Uint8Array(event.target.value.buffer);
