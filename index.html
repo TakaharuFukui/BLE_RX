@@ -316,8 +316,12 @@
     canvas.addEventListener('pointerup', (e) => removeTouch(e.pointerId));
     canvas.addEventListener('pointercancel', (e) => removeTouch(e.pointerId));
     window.addEventListener('resize', resize);
+    window.addEventListener('load', () => {
+      resize();
+      setTimeout(resize, 300);
+      updateUI();
+    });
     resize();
-    updateUI();
   </script>
 </body>
 </html>
