@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>DMX Controller</title>
+  <style>
+    * { box-sizing: border-box; }
+    body, html {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden; background: #111; font-family: sans-serif;
+      touch-action: none; color: #fff;
+      overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none; display: flex; flex-direction: column;
+    }
+    canvas { display: block; width: 100%; flex: 1; touch-action: none; min-height: 0; }
+    #panel {
+      background: #222; display: flex;
+      padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
+      border-top: 1px solid #444; user-select: none; flex-shrink: 0;
+    }
+    .p-row { display: flex; justify-content: space-between; align-items: center; gap: 4px; width: 100%; height: 48px; }
+    .v-sep { width: 2px; height: 80%; background: #555; margin: 0 2px; }
+    .btn {
+      flex: 1; height: 100%; padding: 2px 1px; background: #333; color: #fff;
+      border: 1px solid #666; border-radius: 6px; font-size: 11px; font-weight: bold;
+      display: flex; align-items: center; justify-content: center; text-align: center;
+      line-height: 1.1; -webkit-tap-highlight-color: transparent;
+    }
+    .btn.active { background: #007acc; border-color: #00aaff; }
+    .btn.midi-connected { background: #28a745; border-color: #34ce57; }
+  </style>
+</head>
+<body>
+  <canvas id="touchCanvas"></canvas>
+  <div id="panel">
+    <div class="p-row">
+      <button class="btn" id="m0" onclick="setModes(0,ctrlMode)">標準</button>
+      <button class="btn" id="m1" onclick="setModes(1,ctrlMode)">暖色</button>
+      <button class="btn" id="m2" onclick='setModes(2,ctrlMode)'>寒色</button>
+      <button class="btn" id="m3" onclick="setModes(3,ctrlMode)">エメラルド</button>
+      <div class="v-sep"></div>
+      <button class="btn" id="c0" onclick="setModes(currentMode,0)">独立</button>
+      <button class="btn" id="c1" onclick="setModes(currentMode,1)">明暗反転</button>
+      <button class="btn" id="c2" onclick="setModes(currentMode,2)">色反転</button>
+      <button class="btn" id="midiBtn" onclick="connectBLEMIDI()">MIDI接続</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('touchCanvas');
+    const ctx = canvas.getContext('2d');
+    let activeTouches = {}, currentMode = 0, ctrlMode = 0;
+
+    // パネル表示判定
+    document.body.classList.add('has-panel');
+
+    document.addEventListener('touchmove', (e) => { e.preventDefault(); }, { passive: false });
+    document.addEventListener('gesturestart', (e) => { e.preventDefault(); });
+
+    // ESP32へのローカルWebSocket接続
+    const ws = new WebSocket('ws://192.168.4.1:81/');
+    ws.binaryType = 'arraybuffer';
+
+    ws.onmessage = (evt) => {
+      const data = new Uint8Array(evt.data);
+      if (data[0] === 0xFF) {
+        currentMode = data[1];
+        ctrlMode    = data[2];
+        updateUI();
+        draw();
+      }
+    };
+
+    async function connectBLEMIDI() {
+      const midiServiceUUID = '03b80e5a-ede8-4b33-a751-6ce34e4c7000';
+      const midiCharUUID    = '7772e528-29b2-4b23-a877-2415836f1205';
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [midiServiceUUID] }],
+          optionalServices: [midiServiceUUID]
+        });
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(midiServiceUUID);
+        const chara = await service.getCharacteristic(midiCharUUID);
+        await chara.startNotifications();
+        chara.addEventListener('characteristicvaluechanged', handleBLEMIDIPacket);
+        const btn = document.getElementById('midiBtn');
+        if (btn) { btn.classList.add('midi-connected'); btn.innerText = 'MIDI OK'; }
+      } catch (err) {
+        console.error('BLE MIDI 接続エラー:', err);
+        alert('BLE MIDI機器の接続に失敗したか、キャンセルされました。');
+      }
+    }
+
+    function handleBLEMIDIPacket(event) {
+      const val = new Uint8Array(event.target.value.buffer);
+      if (val.length < 3) return;
+      let idx = 0;
+      if (val[idx] & 0x80) idx++;
+      while (idx < val.length) {
+        if ((val[idx] & 0x80) && (idx + 1 < val.length) && !(val[idx + 1] & 0x80)) idx++;
+        if (idx + 2 < val.length && (val[idx] & 0x80)) {
+          const status = val[idx] & 0xF0;
+          const note   = val[idx + 1];
+          const vel    = val[idx + 2];
+          if (status === 0x90 && vel > 0) {
+            switch(note) {
+              case 60: setModes(0, ctrlMode); break;
+              case 62: setModes(1, ctrlMode); break;
+              case 64: setModes(2, ctrlMode); break;
+              case 65: setModes(3, ctrlMode); break;
+              case 67: setModes(currentMode, 0); break;
+              case 69: setModes(currentMode, 1); break;
+              case 71: setModes(currentMode, 2); break;
+            }
+          }
+          idx += 3;
+        } else { idx++; }
+      }
+    }
+
+    function setModes(m, c) {
+      if (ws.readyState === 1) {
+        ws.send(new Uint8Array([0xFF, m, c, 0]).buffer);
+      }
+    }
+
+    function updateUI() {
+      for (let i = 0; i < 4; i++) {
+        const em = document.getElementById('m' + i);
+        if (em) em.classList.toggle('active', i === currentMode);
+        const ec = document.getElementById('c' + i);
+        if (ec) ec.classList.toggle('active', i === ctrlMode);
+      }
+    }
+
+    function resize() {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      draw();
+    }
+
+    function getCanvasCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left) * (canvas.width / rect.width),
+        y: (e.clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+
+    function hueToRgb(h) {
+      h = h - Math.floor(h);
+      let r, g, b, i = Math.floor(h * 6), f = h * 6 - i;
+      switch (i % 6) {
+        case 0: r = 1; g = f; b = 0; break;
+        case 1: r = 1 - f; g = 1; b = 0; break;
+        case 2: r = 0; g = 1; b = f; break;
+        case 3: r = 0; g = 1 - f; b = 1; break;
+        case 4: r = f; g = 0; b = 1; break;
+        case 5: r = 1; g = 0; b = 1 - f; break;
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
+
+    function getRgbFromRatio(ratio) {
+      let h = 0;
+      if (currentMode === 0) h = -0.17 + ratio * 1.17;
+      else if (currentMode === 1) h = -0.17 + ratio * 0.42;
+      else if (currentMode === 2) h = 0.33 + ratio * 0.50;
+      else if (currentMode === 3) h = 0.08 + ratio * 0.59;
+      return hueToRgb(h);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const step = canvas.width / 100;
+      
+      if (ctrlMode === 0) {
+        const midY = canvas.height / 2;
+        const hRegion = midY;
+        const t1_wLimit   = hRegion / 4;
+        const t1_dimStart = hRegion / 2;
+        const t1_dimEnd   = (3 * hRegion) / 4;
+        const t2_dimStart = midY + hRegion / 2;
+        const t2_dimEnd   = midY + (3 * hRegion) / 4;
+
+        for (let i = 0; i < 100; i++) {
+          const rgb = getRgbFromRatio(i / 100);
+          ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          ctx.fillRect(i * step, 0, step + 1, midY - 2);
+          ctx.fillRect(i * step, midY + 2, step + 1, midY - 2);
+        }
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(0, t1_wLimit);   ctx.lineTo(canvas.width, t1_wLimit);   ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, t1_dimStart); ctx.lineTo(canvas.width, t1_dimStart); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, t1_dimEnd);   ctx.lineTo(canvas.width, t1_dimEnd);   ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, t2_dimStart); ctx.lineTo(canvas.width, t2_dimStart); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, t2_dimEnd);   ctx.lineTo(canvas.width, t2_dimEnd);   ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#111'; ctx.fillRect(0, midY - 2, canvas.width, 4);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = 'bold 13px sans-serif';
+        ctx.fillText('W Zone (255 -> 0)', 15, 16);
+        ctx.fillText('RGB 1 (CH 1-10) [上段]', 15, t1_wLimit + 18);
+        ctx.fillText('Dimmer 1 Fade (255 -> 0)', 15, t1_dimStart + 18);
+        ctx.fillText('Dimmer 1 = 0 Zone', 15, t1_dimEnd + 18);
+        ctx.fillText('RGB 2 (CH 11-20) [下段]', 15, midY + 18);
+        ctx.fillText('Dimmer 2 Fade (255 -> 0)', 15, t2_dimStart + 18);
+        ctx.fillText('Dimmer 2 = 0 Zone', 15, t2_dimEnd + 18);
+      } else {
+        const hRegion = canvas.height;
+        const wLimit   = hRegion / 4;
+        const dimStart = hRegion / 2;
+        const dimEnd   = (3 * hRegion) / 4;
+
+        for (let i = 0; i < 100; i++) {
+          const rgb = getRgbFromRatio(i / 100);
+          ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+          ctx.fillRect(i * step, 0, step + 1, canvas.height);
+        }
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(0, wLimit);   ctx.lineTo(canvas.width, wLimit);   ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, dimStart); ctx.lineTo(canvas.width, dimStart); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, dimEnd);   ctx.lineTo(canvas.width, dimEnd);   ctx.stroke();
+        ctx.setLineDash([]);
+
+        const names = ['', '【明暗反転連動】', '【色反転連動】'];
+        ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = 'bold 14px sans-serif';
+        ctx.fillText('W Zone (255 -> 0) ' + (names[ctrlMode]||''), 15, 20);
+        ctx.fillText('RGB 1 & 2 (全画面操作)', 15, wLimit + 22);
+        ctx.fillText('Master Dimmer Fade (255 -> 0)', 15, dimStart + 22);
+        ctx.fillText('Master Dimmer = 0 Zone', 15, dimEnd + 22);
+      }
+
+      Object.values(activeTouches).forEach(t => {
+        ctx.beginPath(); ctx.arc(t.x, t.y, 35, 0, Math.PI * 2);
+        ctx.strokeStyle = 'white'; ctx.lineWidth = 4; ctx.stroke();
+        ctx.fillStyle = 'white'; ctx.font = '14px sans-serif';
+        ctx.fillText(ctrlMode === 0 ? 'RGB' + t.target : 'SYNC', t.x - 18, t.y + 5);
+      });
+    }
+
+    function processTouch(target, x, y) {
+      if (ws.readyState !== 1) return;
+      const ratio = Math.min(1.0, Math.max(0.0, x / canvas.width));
+      const rgb = getRgbFromRatio(ratio);
+
+      let w = 0, dim = 255;
+
+      if (ctrlMode === 0) {
+        const midY = canvas.height / 2;
+        const hRegion = midY;
+        const wLimit   = hRegion / 4;
+        const dimStart = hRegion / 2;
+        const dimEnd   = (3 * hRegion) / 4;
+
+        if (target === 1) {
+          if (y <= wLimit) w = Math.round((1.0 - (y / wLimit)) * 255.0);
+          if (y >= dimStart) {
+            if (y >= dimEnd) dim = 0;
+            else dim = Math.round((1.0 - ((y - dimStart) / (dimEnd - dimStart))) * 255.0);
+          }
+        } else {
+          const yRel = y - midY;
+          if (yRel >= dimStart) {
+            if (yRel >= dimEnd) dim = 0;
+            else dim = Math.round((1.0 - ((yRel - dimStart) / (dimEnd - dimStart))) * 255.0);
+          }
+        }
+      } else {
+        const hRegion = canvas.height;
+        const wLimit   = hRegion / 4;
+        const dimStart = hRegion / 2;
+        const dimEnd   = (3 * hRegion) / 4;
+
+        if (y <= wLimit) w = Math.round((1.0 - (y / wLimit)) * 255.0);
+        if (y >= dimStart) {
+          if (y >= dimEnd) dim = 0;
+          else dim = Math.round((1.0 - ((y - dimStart) / (dimEnd - dimStart))) * 255.0);
+        }
+      }
+
+      w = Math.min(255, Math.max(0, w));
+      dim = Math.min(255, Math.max(0, dim));
+
+      ws.send(new Uint8Array([target, rgb[0], rgb[1], rgb[2], w, dim]).buffer);
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      try { canvas.setPointerCapture(e.pointerId); } catch(err){}
+      const pos = getCanvasCoords(e);
+      const clampedY = Math.min(canvas.height, Math.max(0, pos.y));
+      const target = (ctrlMode === 0 && clampedY >= canvas.height / 2) ? 2 : 1;
+      activeTouches[e.pointerId] = { x: pos.x, y: clampedY, target: target };
+      processTouch(target, pos.x, clampedY); draw();
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (activeTouches[e.pointerId]) {
+        e.preventDefault();
+        const pos = getCanvasCoords(e);
+        const clampedY = Math.min(canvas.height, Math.max(0, pos.y));
+        activeTouches[e.pointerId].x = pos.x;
+        activeTouches[e.pointerId].y = clampedY;
+        processTouch(activeTouches[e.pointerId].target, pos.x, clampedY); draw();
+      }
+    });
+
+    function removeTouch(id) { delete activeTouches[id]; draw(); }
+    canvas.addEventListener('pointerup', (e) => removeTouch(e.pointerId));
+    canvas.addEventListener('pointercancel', (e) => removeTouch(e.pointerId));
+    window.addEventListener('resize', resize);
+    resize();
+    updateUI();
+  </script>
+</body>
+</html>
